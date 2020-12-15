@@ -6,6 +6,9 @@ function init(self)
 	self.gameover_node = gui.get_node( 'gameover' )
 	gui.set_enabled( self.gameover_node, false )
 
+	self.home_node = gui.get_node( 'homebtn' )
+	self.info_node = gui.get_node( 'infobtn' )
+
 	self.score_node = gui.get_node( 'score' )
 	self.score = 0
 	self.missed_node = gui.get_node( 'misses' )
@@ -96,6 +99,12 @@ function on_input(self, action_id, action)
 					self.missed_pucks = 0
 					gui.set_enabled( self.gameover_node, false )
 					start_new_round( self )
+				end
+			else
+				if( gui.pick_node(self.home_node,action.x,action.y) ) then
+					sys.open_url( 'https://blue-turtle.net/' )
+				elseif( gui.pick_node(self.info_node,action.x,action.y) ) then
+					sys.open_url( 'https://blue-turtle.net/flicker-hockey/' )
 				end
 			end
 		end
