@@ -1,0 +1,344 @@
+
+--[[
+
+puck_ctlr.script handles the user-input and checks for puck-crossing
+	* sends messages to puck objects to alter linear/angular damping (allowing pucks to move/collide)
+	* puck-crossing has to be done frame-by-frame
+
+]]--
+
+local game_state = 'stop'
+
+-- tracks if a push is in process (to speed up the 'update' code)
+local push_in_process = false
+-- tracks if a puck-crossing has occurred
+local trigger_flag = false
+-- tracks if a goal was scored
+local goal_flag = false
+
+-- list of known puck objects
+local puck_list = {}
+
+local power2_bands  = { 0, 15000, 19000, 22000, 25000 }
+local power2_colors = { 
+	vmath.vector4(0.5,0,0,1),
+	vmath.vector4(0.7,0,0,1),
+	vmath.vector4(1.0,0,0,1),
+	vmath.vector4(1.0,0.3,0.3,1),
+	vmath.vector4(1.0,0.5,0.5,1),
+}
+
+-- for the aiming line(s)
+local aimlines = { vmath.vector3(0,0,0),
+	vmath.vector3(1,0,0),vmath.vector3(-1,0,0),
+	vmath.vector3(0,1,0),vmath.vector3(0,-1,0), 
+}
+
+
+function drop_new_gift( self )
+	if( game_state == 'running' ) then
+		local dur = math.random(5,10)
+		local dtype = math.random(1,100)
+		if( dtype < 34 ) then
+			print( 'dropping a gift' )
+			factory.create( '#giftfactory', nil, nil, { duration=dur }, 1.0 )
+		elseif( dtype < 68 ) then
+			print( 'dropping an obstacle' )
+			factory.create( '#obsfactory', nil, nil, { duration=dur }, 1.0 )
+		else
+			print( 'dropping two gifts' )
+			factory.create( '#giftfactory', nil, nil, { duration=dur }, 1.0 )
+			factory.create( '#giftfactory', nil, nil, { duration=dur }, 1.0 )
+		end
+
+		local delay = dur + math.random(3,10)
+		timer.delay( delay, false, function(s,h,e)
+			msg.post( '.', 'drop_gift' )
+		end )
+	end
+end
+
+function push_complete( self, handle, time_elapsed )
+	print( 'push complete', self.last_touch )
+
+	-- enable/turn-on the 'ready' indicator
+	msg.post( 'ready', 'enable' )
+
+	-- un-select the touched-puck-obj
+	-- NOTE: sometimes check_out happens before we get here
+	local err = pcall( go.set, self.main_puck.url, 'isSelected', 0 )
+
+	if( trigger_flag ) then
+		print( 'detected crossing ... good!' )
+		msg.post( '/hud', 'thru_score' )
+
+		if( goal_flag ) then
+			print( 'goal scored ... very good!' )
+			msg.post( '/hud', 'goal_score' )
+
+			if( self.goal_loc == 'lft' ) then
+				print( 'left goal' )
+				go.set( '/pfx', 'position', vmath.vector3(71,256,0.1) )
+				go.set( '/pfx', 'euler.z', -90 )
+			else
+				print( 'right goal' )
+				go.set( '/pfx', 'position', vmath.vector3(953,256,0.1) )
+				go.set( '/pfx', 'euler.z', 90 )
+			end
+			particlefx.play( '/pfx#goal_pfx' )
+		end
+
+	else
+		print( 'puck did not cross ... bad!' )
+		local orig_pos = {}
+		for i,p in pairs(self.orig_pos) do
+			table.insert( orig_pos, p )
+		end
+		msg.post( '/hud', 'puck_missed', {orig_pos=orig_pos} )
+	end
+
+	-- reset flags for next push
+	push_in_process = false
+	trigger_flag = false
+	goal_flag = false
+end
+
+function apply_push( self, force )
+	-- lock out other actions
+	push_in_process = true
+	-- reset the trigger & goal flags (to detect if a crossing happened)
+	trigger_flag = false
+	goal_flag = false
+
+	-- disable/turn-off the 'ready' indicator
+	msg.post( 'ready', 'disable' )
+	
+	-- check that puck went through the other two
+	-- : and mark the touched-puck to see if it scores a goal
+	self.main_puck = self.touch_obj
+	self.alt_pucks = {}
+	for key,obj in pairs(puck_list) do
+		if( obj == self.main_puck ) then
+			go.set( obj.url, 'isSelected', 1 )
+			msg.post( obj.path, 'push_puck', { force=force } )
+		else
+			go.set( obj.url, 'isSelected', 0 )
+			msg.post( obj.path, 'resume_motion' )
+			table.insert( self.alt_pucks, obj )
+		end
+	end
+
+	-- TODO: this 4.0s delay must match what's in the puck slow-down script
+	--     : it should be 2x the puck-delay since a puck could hit another (triggering a 2nd puck-delay)
+	timer.delay( 4.0, false, push_complete )
+end
+
+
+
+function init(self)
+	-- basic prep for the whole game
+	math.randomseed( os.time() )
+
+	--msg.post("@render:", "use_fixed_fit_projection", { near = -1, far = 1 })
+	msg.post( '.', 'acquire_input_focus' )
+
+	msg.post( 'ready', 'disable' )
+
+	self.touch_obj = nil
+	push_in_process = false
+	trigger_flag = false
+	goal_flag = false
+
+	game_state = 'stopped'
+	
+end
+
+-- function final(self)
+-- end
+
+function on_message( self, message_id, message, sender )
+	--print( 'main-recvd message ',message_id,' from ', sender, message.url )
+	if( message_id == hash('check_in' ) ) then
+		print( 'main: check_in', sender )
+		puck_list[ message.path ] = message
+	elseif( message_id == hash('check_out' ) ) then
+		print( 'main: check_out', sender )
+		local idx = nil
+		if( puck_list[ message.path ] == nil ) then
+			print( 'bad value for checkout' )
+		else
+			puck_list[ message.path ] = nil
+		end
+
+	elseif( message_id == hash('start_game') ) then
+		game_state = 'running'
+
+		-- start the gift-drop (random) cycle
+		drop_new_gift( self )
+
+	elseif( message_id == hash('stop_game') ) then
+		game_state = 'stopped'
+
+	elseif( message_id == hash('new_pucks') ) then
+		print( 'new_pucks' )
+		
+		msg.post( 'ready', 'enable' )
+		-- need to restart from last position
+		-- : delete the old pucks
+		for i,p in pairs(puck_list) do
+			go.delete( p.path )
+		end
+		-- : create new ones
+		for key,val in pairs(message.orig_pos) do
+			local id = factory.create( '#puckfactory', val, nil, { imageNum=message.counter+1 }, 1.0 )
+		end
+		
+	elseif( message_id == hash('collision_response' ) ) then
+		if( message.other_id == self.main_puck.id ) then
+			goal_flag = true
+			if( message.own_group == hash('goal_lft') ) then
+				self.goal_loc = 'lft'
+			elseif( message.own_group == hash('goal_rgt') ) then
+				self.goal_loc = 'rgt'
+			end
+		end
+
+	elseif( message_id == hash('all_stop') ) then
+		for i,p in pairs(pucklist) do
+			msg.post( p.path, 'halt_motion' )
+		end
+
+	elseif( message_id == hash('drop_gift') ) then
+		drop_new_gift( self )
+	end
+end
+
+function update( self, dt )
+	if( push_in_process ) then
+		-- re-orient the trigger-line
+		local pos = {}
+		for i,p in pairs(puck_list) do
+			pos[p.path] = go.get_position(p.url)
+		end
+		local p0 = self.orig_pos[ self.last_touch.path ]
+		local p1 = pos[ self.main_puck.path ]
+		local p2 = pos[ self.alt_pucks[1].path ]
+		local p3 = pos[ self.alt_pucks[2].path ]
+
+		-- following: https://stackoverflow.com/questions/563198/how-do-you-detect-where-two-line-segments-intersect
+		if( trigger_flag == false ) then
+			local s1 = vmath.vector3( p1.x-p0.x, p1.y-p0.y, 0 )
+			local s2 = vmath.vector3( p3.x-p2.x, p3.y-p2.y, 0 )
+			local s = (-s1.y * (p0.x - p2.x) + s1.x * (p0.y - p2.y)) / (-s2.x * s1.y + s1.x * s2.y)
+			local t = ( s2.x * (p0.y - p2.y) - s2.y * (p0.x - p2.x)) / (-s2.x * s1.y + s1.x * s2.y)
+			if( (s>=0) and (s<=1) and (t>=0) and (t<=1) ) then
+				-- Collision detected
+				local i_x = p0.x + (t * s1.x)
+				local i_y = p0.y + (t * s1.y)
+				print( 'puck went through' )
+				trigger_flag = true
+				-- tell the puck to fire its pfx
+				msg.post( self.main_puck.path, 'puck_crossing' )
+			end
+		end
+
+		-- debugging: show the line-gfx obj on-screen
+		--msg.post("@render:", "draw_line", { start_point=p2, end_point=p3, color = vmath.vector4(0,0,0,1) } )
+		if( false ) then
+			local pmid = ( p2 + p3 ) / 2
+			pmid.z = 1  -- put it on top for debugging
+			--print( 'pmid', pmid )
+			local delta = vmath.vector3( p3.x-p2.x, p3.y-p2.y, 0 )
+			local scl = vmath.length( delta ) / 134
+			delta = vmath.normalize( delta )
+			local qt = vmath.quat_from_to( vmath.vector3(1,0,0), delta )
+			go.set_position( pmid, '/line' )
+			go.set_rotation( qt, '/line' )
+			go.set_scale( scl, '/line' )
+		end
+
+	end
+end
+
+--
+-- handle input
+--
+local function is_inside( obj, x, y )
+	local my_url = msg.url( obj.socket, obj.path, 'sprite' )
+	local my_size = go.get( my_url, 'size' )
+	local my_scale = go.get( obj.path, 'scale' )
+	local my_pos  = go.get( obj.path, 'position' )
+	local my_x1 = my_pos.x - my_scale.x*my_size.x*0.50
+	local my_y1 = my_pos.y - my_scale.y*my_size.y*0.50
+	local my_x2 = my_pos.x + my_scale.x*my_size.x*0.50
+	local my_y2 = my_pos.y + my_scale.y*my_size.y*0.50
+	local rtn = false
+	if( (x>=my_x1) and (x<=my_x2) and (y>=my_y1) and (y<=my_y2) ) then
+		rtn = true
+	end
+	return rtn
+end
+
+function on_input( self, action_id, action )
+	local rtn = false
+	if( action_id == hash('touch') ) then
+		if( not push_in_process ) then
+			if( action.pressed ) then
+				for key,obj in pairs(puck_list) do
+					if( is_inside(obj,action.x,action.y) ) then
+						self.touch_obj = obj
+						self.xyz0 = go.get_position( obj.path )
+						
+						self.orig_pos = {}
+						for i,p in pairs(puck_list) do
+							self.orig_pos[p.path] = go.get_position( p.path )
+						end
+						rtn = true
+					end
+				end
+			elseif( action.released ) then
+				if( self.touch_obj ~= nil ) then
+					local vec = vmath.vector3( self.xyz0.x-action.x, self.xyz0.y-action.y, 0 )
+					local power = vmath.length_sqr( vec )
+					if( power > power2_bands[5] ) then
+						power = power2_bands[5]
+					end
+					vec = vmath.normalize( vec )
+					--print( 'power', power )
+					--apply_push( self.touch_obj, 0.10*power*vec )
+					apply_push( self, 0.10*power*vec )
+					self.last_touch = self.touch_obj
+					self.touch_obj = nil
+					self.xyz0 = nil
+					rtn = true
+				end
+			else
+				-- should be a touch-drag operation
+				if( self.touch_obj ~= nil ) then
+					local xyz0 = vmath.vector3(self.xyz0)
+					local xyz1 = vmath.vector3(action.x,action.y,0.1)
+					local vec = vmath.vector3( self.xyz0.x-action.x, self.xyz0.y-action.y, 0 )
+					local power = vmath.length_sqr( vec )
+					local color = power2_colors[1]
+					for i=1,#power2_bands do
+						if( power >= power2_bands[i] ) then
+							color = power2_colors[i]
+						end
+					end
+					if( power > power2_bands[5] ) then
+						power = power2_bands[5]
+					end
+
+					-- draw the aiming line(s)
+					for i,dd in pairs(aimlines) do
+						local xyz0p = xyz0 + dd
+						local xyz1p = xyz1 + dd
+						msg.post("@render:", "draw_line", { start_point=xyz0p, end_point=xyz1p, color=color } )
+					end
+					rtn = true
+				end
+			end
+		end
+	end
+	return rtn
+end
