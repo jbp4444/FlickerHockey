@@ -1,5 +1,6 @@
 [project]
-title = Xmas2020
+title = Flicker Hockey
+version = 20210126.1
 
 [bootstrap]
 main_collection = /main/main.collectionc
@@ -27,4 +28,10 @@ input_method = HiddenInputField
 [physics]
 gravity_y = 0.0
 scale = 0.01
+
+[render]
+clear_color_red = 1.0
+clear_color_green = 1.0
+clear_color_blue = 1.0
+clear_color_alpha = 1.0
 
